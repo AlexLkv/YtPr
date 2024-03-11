@@ -1,79 +1,166 @@
-import csv
-import requests
-from bs4 import BeautifulSoup
-import nltk
-from nltk.corpus import stopwords
-import re
-import pymorphy2
+import pandas as pd
+import numpy as np
+from sqlalchemy import create_engine
+import seaborn as sns
+import matplotlib.pyplot as plt
 
-# Download NLTK resources
-nltk.download('stopwords')
 
-# Initialize stopwords and morphological analyzer
-russian_stopwords = set(stopwords.words('russian'))
-morph = pymorphy2.MorphAnalyzer()
+##########1.1##########
 
-# Function to remove punctuation
-def remove_punct(text):
-    return re.sub(r'\W+', ' ', text)
 
-# Function to normalize word
-def norm_word(w):
-    parsed_word = morph.parse(w)[0]
-    return parsed_word.normal_form
+# Параметры подключения к базе данных
+DB_USER = 'your_username'
+DB_PASSWORD = 'your_password'
+DB_HOST = 'localhost'
+DB_PORT = '5432'  # Порт базы данных
+DB_NAME = 'Users'
 
-# Function to filter nouns and adjectives
-def is_noun_or_adjective(x):
-    parsed_word = morph.parse(x)[0]
-    return parsed_word.tag.POS in ('NOUN', 'ADJF')
+# Создание строки подключения
+connection_str = f'postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}'
 
-# URL
-url_base = "https://habr.com/ru/"
 
-# Initialize CSV file and write headers
-with open('companies.csv', 'a', newline='', encoding='utf-8') as csvfile:
-    writer = csv.writer(csvfile)
-    writer.writerow(['Name', 'Rating', 'Description', 'Sphere', "txts"])
+# Подключение к базе данных
+engine = create_engine(connection_str)
 
-# Companies data
-companies = {'yandex': [793744, 793722, 45678], 'gazprombank': [56558, 5516, 7111], 'ncloudtech': [7141, 7844, 4641],
-             'xeovo': [1234, 1235, 1236]}
+# Считывание данных из таблицы visitation
+visitation_df = pd.read_sql_table('visitation', con=engine)
 
-# Process each company
-for company in companies:
-    url = url_base + 'companies/' + company + '/profile/'
-    response = requests.get(url)
-    soup = BeautifulSoup(response.text, 'html.parser')
+# Считывание данных из таблицы orders
+orders_df = pd.read_sql_table('orders', con=engine)
 
-    # Extracting company info
-    name = soup.find_all(class_='tm-company-card__name')[0].text.strip()
-    rating = soup.find_all(class_='tm-votes-lever__score-counter tm-votes-lever__score-counter tm-votes-lever__score-counter_rating')[0].text.strip()
-    description = ''.join(soup.find('span', class_='tm-company-profile__content').find('span').get_text().split('\n')).replace("\n", ' ')
-    industries = ''.join(soup.find_all(class_='tm-company-profile__categories')[0].text.strip().split('\n            \n             '))
+# Считывание данных из таблицы expenses
+expenses_df = pd.read_sql_table('expenses', con=engine)
 
-    # Extracting articles text
-    articles = []
-    for txt_id in companies[company]:
-        url = url_base + 'articles/' + str(txt_id)
-        response = requests.get(url)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        txt = soup.find_all(class_='tm-article-body')[0].text.replace("\n", ' ')
-        articles.append(txt)
 
-    # Preprocess data
-    description = remove_punct(description.lower())
-    description = ' '.join([norm_word(word) for word in description.split() if word not in russian_stopwords])
-    description = ' '.join([word for word in description.split() if is_noun_or_adjective(word)])
+##########1.2##########
 
-    #industries = remove_punct(description.lower())
-    #industries = ' '.join([norm_word(word) for word in description.split() if word not in russian_stopwords])
-    #industries = ' '.join([word for word in description.split() if is_noun_or_adjective(word)])
 
-    articles_text = ' '.join([remove_punct(article.lower()) for article in articles])
-    articles_text = ' '.join([norm_word(word) for word in articles_text.split() if word not in russian_stopwords])
-    articles_text = ' '.join([word for word in articles_text.split() if is_noun_or_adjective(word)])
+# Предварительная обработка данных
+def preprocess_data(df):
+    # Обработка пропусков
+    df.fillna(0, inplace=True)  # Заполнение пропусков нулями
 
-    # Writing data to CSV
-    with open('companies.csv', 'a', newline='', encoding='utf-8') as csvfile:
-        writer = csv.writer(csvfile)
-        writer.writerow([name, rating, description, industries, articles_text])
+    # Обработка дубликатов
+    df.drop_duplicates(inplace=True)
+
+    # Обработка аномальных значений
+    for column in df.columns:
+        if df[column].dtype != 'object':  # Проверка только числовых столбцов
+            # Визуализация данных для обнаружения выбросов
+            sns.boxplot(x=df[column])
+            plt.title(column)
+            plt.show()
+
+            # Удаление выбросов
+            q1 = df[column].quantile(0.25)
+            q3 = df[column].quantile(0.75)
+            iqr = q3 - q1
+            threshold = 1.5 * iqr
+            df = df.loc[(df[column] > (q1 - threshold)) & (df[column] < (q3 + threshold))]
+
+    # Приведение данных к приемлемому формату
+    for column in df.columns:
+        if df[column].dtype == 'object':  # Проверка на столбцы с типом object
+            df[column] = pd.to_datetime(df[column], errors='coerce')
+
+    return df
+
+
+# Применение предварительной обработки к каждому DataFrame
+visitation_df = preprocess_data(visitation_df)
+orders_df = preprocess_data(orders_df)
+expenses_df = preprocess_data(expenses_df)
+
+# Обновление данных в базе данных
+visitation_df.to_sql('visitation', engine, if_exists='replace', index=False)
+orders_df.to_sql('orders', engine, if_exists='replace', index=False)
+expenses_df.to_sql('expenses', engine, if_exists='replace', index=False)
+
+print("Данные успешно обновлены в базе данных.")
+
+
+##########1.3##########
+
+
+# Параметры подключения к базе данных
+DB_USER = 'your_username'
+DB_PASSWORD = 'your_password'
+DB_HOST = 'localhost'
+DB_PORT = '5432'  # Порт базы данных
+DB_NAME = 'Users'
+
+# Создание строки подключения
+connection_str = f'postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}'
+
+# Функция для формирования набора данных с профилями пользователей
+def create_user_profiles():
+    # Подключение к базе данных
+    engine = create_engine(connection_str)
+
+    # Загрузка данных о сессиях пользователей
+    sessions_df = pd.read_sql_table('sessions', con=engine)
+
+    # Загрузка данных о расходах на рекламу
+    advertising_costs_df = pd.read_sql_table('advertising_costs', con=engine)
+
+    # Определение даты первого посещения каждого пользователя
+    first_session_dates = sessions_df.groupby('user_id')['timestamp'].min().reset_index()
+    first_session_dates.rename(columns={'timestamp': 'first_session_timestamp'}, inplace=True)
+
+    # Рассчет средней стоимости привлечения пользователей в день
+    average_user_acquisition_cost_per_day = advertising_costs_df['cost'].sum() / len(
+        advertising_costs_df['date'].unique())
+
+    # Объединение данных о первой сессии с данными о пользователях
+    user_profiles_df = first_session_dates.merge(sessions_df, on='user_id')
+
+    # Добавление полей: устройство, регион, рекламный источник
+    user_profiles_df = user_profiles_df.merge(advertising_costs_df, on='campaign_id')
+    user_profiles_df.drop_duplicates(inplace=True)  # Удаление возможных дубликатов
+
+    # Сохранение результата в базе данных
+    user_profiles_df.to_sql('user_profiles', engine, if_exists='replace', index=False)
+
+    print("Набор данных с профилями пользователей успешно создан.")
+
+# Функция для расчета ROI
+def calculate_roi(revenue_df, costs_df):
+    # Группировка доходов по каналам рекламы и вычисление общей прибыли
+    revenue_by_channel = revenue_df.groupby('channel')['revenue'].sum()
+    
+    # Группировка расходов по каналам рекламы и вычисление общих расходов
+    costs_by_channel = costs_df.groupby('channel')['costs'].sum()
+    
+    # Расчет ROI для каждого канала
+    roi_by_channel = ((revenue_by_channel - costs_by_channel) / costs_by_channel) * 100
+    
+    return roi_by_channel
+
+# Функция для расчета LTV
+def calculate_ltv(revenue_df, acquisition_cost_df):
+    # Группировка доходов по пользователям и вычисление общей прибыли
+    revenue_by_user = revenue_df.groupby('user_id')['revenue'].sum()
+    
+    # Расчет средней стоимости привлечения пользователя
+    average_acquisition_cost = acquisition_cost_df['cost'].mean()
+    
+    # Расчет LTV для каждого пользователя
+    ltv_by_user = revenue_by_user - average_acquisition_cost
+    
+    return ltv_by_user
+
+# Функция для расчета удержания и конверсии
+def calculate_retention_and_conversion(users_df, sessions_df):
+    # Определение уникальных пользователей за каждый день
+    daily_users = sessions_df.groupby(pd.Grouper(key='timestamp', freq='D'))['user_id'].nunique()
+    
+    # Расчет удержания пользователей
+    retention_rate = daily_users / users_df.shape[0] * 100
+    
+    # Расчет конверсии
+    conversion_rate = users_df.shape[0] / daily_users
+    
+    return retention_rate, conversion_rate
+
+# Создание набора данных с профилями пользователей
+create_user_profiles()
